@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: sans-serif; background: #000; color: #fff; margin: 0; padding: 12px; font-size: 12px; }
+        h4 { color: #00f2ff; margin: 0 0 8px 0; border-bottom: 1px solid #222; padding-bottom: 5px; }
+        .box { background: #111; border: 1px solid #222; padding: 10px; border-radius: 6px; margin-bottom: 10px; }
+        #log-conexao { font-family: monospace; color: #00ff88; background: #050505; border: 1px solid #222; padding: 6px; font-size: 10px; height: 70px; overflow-y: auto; margin-top: 4px; }
+        .admin-item { background: #161616; border: 1px solid #262626; padding: 8px; border-radius: 4px; margin-top: 6px; display: flex; justify-content: space-between; align-items: center; }
+        .btn-excluir { background: #ff3b30; color: white; padding: 4px 8px; font-size: 10px; border-radius: 3px; border: none; cursor: pointer; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div class="box" style="padding: 8px;">
+        <span style="font-size:11px;"><b>Status do Host:</b> <span id="status-host" style="color: yellow;">Iniciando...</span></span>
+        <div id="log-conexao">Aguardando conexões...</div>
+    </div>
+
+    <div class="box">
+        <h4 style="margin: 0 0 5px 0; border:none; color:#aaa; font-size:11px;">🏆 Ranking Global de Jogadores</h4>
+        <div id="lista-ranking" style="font-size: 11px; color: #666;">Nenhuma pontuação registrada ainda.</div>
+    </div>
+
+    <script>
+        const ID_SALA = "core_os_hub_2026";
+        let peer;
+        let conexoes = [];
+        let rankingGlobal = JSON.parse(localStorage.getItem('core_os_ranking')) || [];
+
+        function iniciarHost() {
+            if (peer) { try { peer.destroy(); } catch(e) {} }
+
+            document.getElementById('status-host').innerText = "Conectando...";
+            log("Iniciando instância do Host na rede P2P...");
+
+            peer = new Peer(ID_SALA, {
+                config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }] }
+            });
+
+            peer.on('open', (id) => {
+                document.getElementById('status-host').innerText = "Online ⚡";
+                log("Host online e pronto!");
+                renderizarRanking();
+            });
+
+            peer.on('disconnected', () => {
+                document.getElementById('status-host').innerText = "Queda detectada, religando...";
+                log("Conexão perdida. Tentando reconectar...");
+                setTimeout(() => { if (peer && peer.disconnected) peer.reconnect(); }, 3000);
+            });
+
+            peer.on('close', () => {
+                document.getElementById('status-host').innerText = "Sala fechada. Reiniciando...";
+                setTimeout(iniciarHost, 4000);
+            });
+
+            peer.on('error', (err) => {
+                if (err.type === 'unavailable-id') {
+                    document.getElementById('status-host').innerText = "ID ocupado, tentando novamente...";
+                    setTimeout(iniciarHost, 4000);
+                } else {
+                    log("Erro: " + err.type);
+                    setTimeout(iniciarHost, 5000);
+                }
+            });
+
+            peer.on('connection', (conn) => {
+                conexoes.push(conn);
+                log(`Novo cliente conectado.`);
+
+                conn.on('open', () => {
+                    // Envia o ranking atualizado assim que o cliente conecta
+                    conn.send({ tipo: "ranking", ranking: rankingGlobal });
+                });
+
+                conn.on('data', (data) => {
+                    if (data.tipo === "atualizar_pontos") {
+                        atualizarPontuacaoJogador(data.usuario, data.jogo, data.pontos);
+                        // Confirma o recebimento para o cliente retirar o item da fila pendente offline
+                        conn.send({ tipo: "confirmacao_pontos", jogo: data.jogo, pontos: data.pontos });
+                    }
+                });
+
+                conn.on('close', () => {
+                    conexoes = conexoes.filter(c => c !== conn);
+                    log(`Cliente desconectado.`);
+                });
+            });
+        }
+
+        iniciarHost();
+
+        function atualizarPontuacaoJogador(usuario, jogo, pontos) {
+            let index = rankingGlobal.findIndex(r => r.usuario === usuario && r.jogo === jogo);
+            if (index !== -1) {
+                if (pontos > rankingGlobal[index].pontos) {
+                    rankingGlobal[index].pontos = pontos;
+                }
+            } else {
+                rankingGlobal.push({ usuario, jogo, pontos });
+            }
+            rankingGlobal.sort((a, b) => b.pontos - a.pontos);
+            salvarETransmitir();
+            log(`Pontuação processada [${usuario}] -> ${pontos} pts`);
+        }
+
+        function excluirRegistro(usuario, jogo) {
+            if (confirm(`Remover recorde de ${usuario}?`)) {
+                rankingGlobal = rankingGlobal.filter(r => !(r.usuario === usuario && r.jogo === jogo));
+                salvarETransmitir();
+            }
+        }
+
+        function salvarETransmitir() {
+            localStorage.setItem('core_os_ranking', JSON.stringify(rankingGlobal));
+            conexoes.forEach(c => {
+                if(c && c.open) c.send({ tipo: "ranking", ranking: rankingGlobal });
+            });
+            renderizarRanking();
+        }
+
+        function renderizarRanking() {
+            const container = document.getElementById('lista-ranking');
+            if (!rankingGlobal || rankingGlobal.length === 0) {
+                container.innerHTML = "Nenhum recorde registrado.";
+                return;
+            }
+
+            container.innerHTML = rankingGlobal.map(r => `
+                <div class="admin-item">
+                    <div>
+                        <b>👤 ${r.usuario}</b> <span style="color:#777;">(${r.jogo})</span><br>
+                        <span style="color:#00ff88; font-weight:bold;">${r.pontos} PONTOS</span>
+                    </div>
+                    <div>
+                        <button type="button" class="btn-excluir" onclick="excluirRegistro('${r.usuario}', '${r.jogo}')">Apagar</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function log(m) {
+            const l = document.getElementById('log-conexao');
+            if(l) { l.innerHTML += `<div>> ${m}</div>`; l.scrollTop = l.scrollHeight; }
+        }
+    </script>
+</body>
+</html>
+  
